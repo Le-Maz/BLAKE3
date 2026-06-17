@@ -143,6 +143,8 @@ use arrayvec::{ArrayString, ArrayVec};
 use core::cmp;
 use core::fmt;
 use platform::{MAX_SIMD_DEGREE, MAX_SIMD_DEGREE_OR_2, Platform};
+#[cfg(feature = "rand")]
+use std::convert::Infallible;
 #[cfg(feature = "zeroize")]
 use zeroize::Zeroize;
 
@@ -1837,5 +1839,27 @@ impl Zeroize for OutputReader {
 
         inner.zeroize();
         position_within_block.zeroize();
+    }
+}
+
+#[cfg(feature = "rand")]
+impl rand::TryRng for OutputReader {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        let mut buf = [0u8; 4];
+        self.fill(&mut buf);
+        Ok(u32::from_le_bytes(buf))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        let mut buf = [0u8; 8];
+        self.fill(&mut buf);
+        Ok(u64::from_le_bytes(buf))
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        self.fill(dest);
+        Ok(())
     }
 }
