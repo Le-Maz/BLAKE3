@@ -1863,3 +1863,6 @@ impl rand::TryRng for OutputReader {
         Ok(())
     }
 }
+
+#[cfg(feature = "rand")]
+impl rand::TryCryptoRng for OutputReader {}
