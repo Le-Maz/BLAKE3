@@ -1875,8 +1875,8 @@ impl rand::rand_core::block::Generator for OutputReader {
         let mut buf = [0u8; BLOCK_LEN];
         self.fill(&mut buf);
 
-        let (chunks, tail) = buf.as_chunks::<4>();
-        assert!(tail.is_empty());
+        const _: () = assert!(BLOCK_LEN.is_multiple_of(4));
+        let (chunks, _) = buf.as_chunks::<4>();
         for (out, chunk) in output.iter_mut().zip(chunks) {
             *out = u32::from_le_bytes(*chunk);
         }
