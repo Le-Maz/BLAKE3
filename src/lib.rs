@@ -1875,8 +1875,8 @@ impl rand::rand_core::block::Generator for OutputReader {
         let mut buf = [0u8; BLOCK_LEN];
         self.fill(&mut buf);
 
-        // SAFETY: buf.len() is nonzero and exactly divides the slice length
-        let chunks = unsafe { buf.as_chunks_unchecked::<4>() };
+        let (chunks, tail) = buf.as_chunks::<4>();
+        assert!(tail.is_empty());
         for (out, chunk) in output.iter_mut().zip(chunks) {
             *out = u32::from_le_bytes(*chunk);
         }
