@@ -835,6 +835,7 @@ fn test_zeroize() {
         },
         buffer: Some([42; crate::OutputReader::BUFFER_SIZE]),
         position_within_buffer: 42,
+        warmed_up: true,
     };
 
     output_reader.zeroize();
@@ -849,6 +850,7 @@ fn test_zeroize() {
     ));
     assert_eq!(output_reader.buffer, None);
     assert_eq!(output_reader.position_within_buffer, 0);
+    assert!(!output_reader.warmed_up);
 }
 
 #[test]

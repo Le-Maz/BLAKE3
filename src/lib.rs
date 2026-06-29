@@ -1730,6 +1730,7 @@ pub struct OutputReader {
     buffer: Option<[u8; Self::BUFFER_SIZE]>,
     inner: Output,
     position_within_buffer: u16,
+    warmed_up: bool,
 }
 
 impl OutputReader {
@@ -1740,6 +1741,7 @@ impl OutputReader {
             buffer: None,
             inner,
             position_within_buffer: 0,
+            warmed_up: false,
         }
     }
 
@@ -1753,10 +1755,31 @@ impl OutputReader {
     ///
     /// [`Read::read`]: #method.read
     pub fn fill(&mut self, mut buf: &mut [u8]) {
+        let warmed_up = self.warmed_up;
+        self.warmed_up = true;
+
+        // Bypass the buffer for small but aligned requests to avoid overhead.
+        if !warmed_up
+            && self.buffer.is_none()
+            && buf.len() < Self::BUFFER_SIZE
+            && buf.len() % BLOCK_LEN == 0
+        {
+            for i in 0..(buf.len() / BLOCK_LEN) {
+                let block = self.inner.platform.compress_xof(
+                    &self.inner.input_chaining_value,
+                    &self.inner.block,
+                    self.inner.block_len,
+                    self.inner.counter,
+                    self.inner.flags | ROOT,
+                );
+                buf[i * BLOCK_LEN..(i + 1) * BLOCK_LEN].copy_from_slice(&block);
+                self.inner.counter += 1;
+            }
+            return;
+        }
+
         while !buf.is_empty() {
             if self.buffer.is_none() || self.position_within_buffer as usize == Self::BUFFER_SIZE {
-                // Optimization: If the caller is requesting a large amount of data and we are at
-                // a buffer boundary, write directly into their slice to avoid the intermediate copy.
                 if buf.len() >= Self::BUFFER_SIZE {
                     let full_blocks = buf.len() / BLOCK_LEN;
                     let full_blocks_len = full_blocks * BLOCK_LEN;
@@ -1774,7 +1797,6 @@ impl OutputReader {
                     continue;
                 }
 
-                // Otherwise, populate the internal buffer.
                 let mut new_buf = [0u8; Self::BUFFER_SIZE];
                 self.inner.platform.xof_many(
                     &self.inner.input_chaining_value,
@@ -1789,7 +1811,6 @@ impl OutputReader {
                 self.buffer = Some(new_buf);
             }
 
-            // Copy the available bytes from our buffer to the caller's buffer.
             let bytes_available = Self::BUFFER_SIZE - self.position_within_buffer as usize;
             let take = cmp::min(buf.len(), bytes_available);
             let start = self.position_within_buffer as usize;
@@ -1921,10 +1942,12 @@ impl Zeroize for OutputReader {
             buffer,
             inner,
             position_within_buffer,
+            warmed_up,
         } = self;
 
         buffer.zeroize();
         inner.zeroize();
         position_within_buffer.zeroize();
+        warmed_up.zeroize();
     }
 }
