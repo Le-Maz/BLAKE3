@@ -820,7 +820,8 @@ fn test_zeroize() {
             flags: 42,
             platform: crate::Platform::Portable,
         },
-        position_within_block: 42,
+        buffer: Some([42; crate::OutputReader::BUFFER_SIZE]),
+        position_within_buffer: 42,
     };
 
     output_reader.zeroize();
@@ -833,7 +834,8 @@ fn test_zeroize() {
         output_reader.inner.platform,
         crate::Platform::Portable
     ));
-    assert_eq!(output_reader.position_within_block, 0);
+    assert_eq!(output_reader.buffer, None);
+    assert_eq!(output_reader.position_within_buffer, 0);
 }
 
 #[test]

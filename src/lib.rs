@@ -1681,44 +1681,25 @@ impl Zeroize for Hasher {
 /// smell](https://en.wikipedia.org/wiki/Design_smell) in any case.
 #[derive(Clone)]
 pub struct OutputReader {
+    buffer: Option<[u8; Self::BUFFER_SIZE]>,
     inner: Output,
-    position_within_block: u8,
+    position_within_buffer: u16,
 }
 
 impl OutputReader {
+    const BUFFER_SIZE: usize = 16 * BLOCK_LEN;
+
     fn new(inner: Output) -> Self {
         Self {
+            buffer: None,
             inner,
-            position_within_block: 0,
+            position_within_buffer: 0,
         }
-    }
-
-    // This helper function handles both the case where the output buffer is
-    // shorter than one block, and the case where our position_within_block is
-    // non-zero.
-    fn fill_one_block(&mut self, buf: &mut &mut [u8]) {
-        let output_block: [u8; BLOCK_LEN] = self.inner.root_output_block();
-        let output_bytes = &output_block[self.position_within_block as usize..];
-        let take = cmp::min(buf.len(), output_bytes.len());
-        buf[..take].copy_from_slice(&output_bytes[..take]);
-        self.position_within_block += take as u8;
-        if self.position_within_block == BLOCK_LEN as u8 {
-            self.inner.counter += 1;
-            self.position_within_block = 0;
-        }
-        // Advance the dest buffer. mem::take() is a borrowck workaround.
-        *buf = &mut core::mem::take(buf)[take..];
     }
 
     /// Fill a buffer with output bytes and advance the position of the
     /// `OutputReader`. This is equivalent to [`Read::read`], except that it
     /// doesn't return a `Result`. Both methods always fill the entire buffer.
-    ///
-    /// Note that `OutputReader` doesn't buffer output bytes internally, so
-    /// calling `fill` repeatedly with a short-length or odd-length slice will
-    /// end up performing the same compression multiple times. If you're
-    /// reading output in a loop, prefer a slice length that's a multiple of
-    /// [`BLOCK_LEN`] (64 bytes).
     ///
     /// The maximum output size of BLAKE3 is 2<sup>64</sup>-1 bytes. If you try
     /// to extract more than that, for example by seeking near the end and
@@ -1726,35 +1707,55 @@ impl OutputReader {
     ///
     /// [`Read::read`]: #method.read
     pub fn fill(&mut self, mut buf: &mut [u8]) {
-        if buf.is_empty() {
-            return;
-        }
+        while !buf.is_empty() {
+            if self.buffer.is_none() || self.position_within_buffer as usize == Self::BUFFER_SIZE {
+                // Optimization: If the caller is requesting a large amount of data and we are at
+                // a buffer boundary, write directly into their slice to avoid the intermediate copy.
+                if buf.len() >= Self::BUFFER_SIZE {
+                    let full_blocks = buf.len() / BLOCK_LEN;
+                    let full_blocks_len = full_blocks * BLOCK_LEN;
+                    self.inner.platform.xof_many(
+                        &self.inner.input_chaining_value,
+                        &self.inner.block,
+                        self.inner.block_len,
+                        self.inner.counter,
+                        self.inner.flags | ROOT,
+                        &mut buf[..full_blocks_len],
+                    );
+                    self.inner.counter += full_blocks as u64;
+                    self.buffer = None;
+                    buf = &mut buf[full_blocks_len..];
+                    continue;
+                }
 
-        // If we're partway through a block, try to get to a block boundary.
-        if self.position_within_block != 0 {
-            self.fill_one_block(&mut buf);
-        }
+                // Otherwise, populate the internal buffer.
+                let mut new_buf = [0u8; Self::BUFFER_SIZE];
+                self.inner.platform.xof_many(
+                    &self.inner.input_chaining_value,
+                    &self.inner.block,
+                    self.inner.block_len,
+                    self.inner.counter,
+                    self.inner.flags | ROOT,
+                    &mut new_buf,
+                );
+                self.inner.counter += (Self::BUFFER_SIZE / BLOCK_LEN) as u64;
+                self.position_within_buffer = 0;
+                self.buffer = Some(new_buf);
+            }
 
-        let full_blocks = buf.len() / BLOCK_LEN;
-        let full_blocks_len = full_blocks * BLOCK_LEN;
-        if full_blocks > 0 {
-            debug_assert_eq!(0, self.position_within_block);
-            self.inner.platform.xof_many(
-                &self.inner.input_chaining_value,
-                &self.inner.block,
-                self.inner.block_len,
-                self.inner.counter,
-                self.inner.flags | ROOT,
-                &mut buf[..full_blocks_len],
-            );
-            self.inner.counter += full_blocks as u64;
-            buf = &mut buf[full_blocks * BLOCK_LEN..];
-        }
+            // Copy the available bytes from our buffer to the caller's buffer.
+            let bytes_available = Self::BUFFER_SIZE - self.position_within_buffer as usize;
+            let take = cmp::min(buf.len(), bytes_available);
+            let start = self.position_within_buffer as usize;
+            let end = start + take;
 
-        if !buf.is_empty() {
-            debug_assert!(buf.len() < BLOCK_LEN);
-            self.fill_one_block(&mut buf);
-            debug_assert!(buf.is_empty());
+            if let Some(ref internal_buf) = self.buffer {
+                buf[..take].copy_from_slice(&internal_buf[start..end]);
+            }
+            self.position_within_buffer += take as u16;
+
+            let tmp = buf;
+            buf = &mut tmp[take..];
         }
     }
 
@@ -1768,7 +1769,13 @@ impl OutputReader {
     /// [`fill`]: #method.fill
     /// [`Read::read`]: #method.read
     pub fn position(&self) -> u64 {
-        self.inner.counter * BLOCK_LEN as u64 + self.position_within_block as u64
+        let mut pos = self.inner.counter * BLOCK_LEN as u64;
+        if self.buffer.is_some() {
+            // self.inner.counter is ahead by 16 blocks when the buffer is populated.
+            pos -= Self::BUFFER_SIZE as u64;
+            pos += self.position_within_buffer as u64;
+        }
+        pos
     }
 
     /// Seek to a new read position in the output stream. This is equivalent to
@@ -1778,8 +1785,42 @@ impl OutputReader {
     /// [`Seek::seek`]: #method.seek
     /// [`SeekFrom::Start`]: https://doc.rust-lang.org/std/io/enum.SeekFrom.html
     pub fn set_position(&mut self, position: u64) {
-        self.position_within_block = (position % BLOCK_LEN as u64) as u8;
+        let buffer_start_pos = self.inner.counter * BLOCK_LEN as u64
+            - if self.buffer.is_some() {
+                Self::BUFFER_SIZE as u64
+            } else {
+                0
+            };
+
+        // Optimize: if the requested position is already cached in the buffer, just shift the index.
+        if self.buffer.is_some()
+            && position >= buffer_start_pos
+            && position < buffer_start_pos + Self::BUFFER_SIZE as u64
+        {
+            self.position_within_buffer = (position - buffer_start_pos) as u16;
+            return;
+        }
+
         self.inner.counter = position / BLOCK_LEN as u64;
+        self.buffer = None;
+        self.position_within_buffer = 0;
+
+        // If the position is unaligned, fetch the data so the next read has it ready.
+        let offset_within_block = (position % BLOCK_LEN as u64) as u16;
+        if offset_within_block != 0 {
+            let mut new_buf = [0u8; Self::BUFFER_SIZE];
+            self.inner.platform.xof_many(
+                &self.inner.input_chaining_value,
+                &self.inner.block,
+                self.inner.block_len,
+                self.inner.counter,
+                self.inner.flags | ROOT,
+                &mut new_buf,
+            );
+            self.inner.counter += (Self::BUFFER_SIZE / BLOCK_LEN) as u64;
+            self.position_within_buffer = offset_within_block;
+            self.buffer = Some(new_buf);
+        }
     }
 }
 
@@ -1831,11 +1872,13 @@ impl Zeroize for OutputReader {
     fn zeroize(&mut self) {
         // Destructuring to trigger compile error as a reminder to update this impl.
         let Self {
+            buffer,
             inner,
-            position_within_block,
+            position_within_buffer,
         } = self;
 
+        buffer.zeroize();
         inner.zeroize();
-        position_within_block.zeroize();
+        position_within_buffer.zeroize();
     }
 }
