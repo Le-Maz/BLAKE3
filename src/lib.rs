@@ -1418,6 +1418,52 @@ impl Hasher {
         OutputReader::new(self.final_output())
     }
 
+    /// Finalize the hash state and fill a buffer with extended output.
+    ///
+    /// This is equivalent to calling [`Hasher::finalize_xof`] and then
+    /// [`OutputReader::fill`], but it can be more efficient. [`OutputReader`]
+    /// buffers output internally to optimize frequent, small reads. For
+    /// callers who only need a single output of a known size (for example,
+    /// 64 bytes for Ed25519), this method avoids that buffering overhead.
+    ///
+    /// This method is idempotent. Calling it twice will give the same result.
+    /// You can also add more input and finalize again.
+    pub fn finalize_xof_into(&self, mut buf: &mut [u8]) {
+        assert_eq!(
+            self.initial_chunk_counter, 0,
+            "set_input_offset must be used with finalize_non_root",
+        );
+
+        if buf.len() >= OutputReader::BUFFER_SIZE {
+            self.finalize_xof().fill(buf);
+            return;
+        }
+
+        let mut output = self.final_output();
+        let mut block: [u8; BLOCK_LEN];
+
+        while buf.len() >= BLOCK_LEN {
+            block = output.root_output_block();
+
+            buf[..BLOCK_LEN].copy_from_slice(&block);
+
+            output.counter += 1;
+            let tmp = buf;
+            buf = &mut tmp[BLOCK_LEN..];
+        }
+        if !buf.is_empty() {
+            block = output.root_output_block();
+            buf.copy_from_slice(&block[..buf.len()]);
+        }
+
+        #[cfg(feature = "zeroize")]
+        {
+            output.zeroize();
+            block = [0u8; BLOCK_LEN];
+            block.zeroize();
+        }
+    }
+
     /// Return the total number of bytes hashed so far.
     ///
     /// [`hazmat::HasherExt::set_input_offset`] does not affect this value. This only counts bytes

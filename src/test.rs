@@ -468,6 +468,19 @@ fn test_xof_partial_blocks() {
     assert_eq!(reference_out, partial_out);
 }
 
+#[test]
+fn test_finalize_xof_into() {
+    for &size in TEST_CASES {
+        let mut test_buf = vec![0u8; size];
+        let mut ref_buf = vec![0u8; size];
+
+        crate::Hasher::new().finalize_xof_into(&mut test_buf);
+        reference_impl::Hasher::new().finalize(&mut ref_buf);
+
+        assert_eq!(test_buf, ref_buf, "mismatch at size {}", size);
+    }
+}
+
 fn reference_hash(input: &[u8]) -> crate::Hash {
     let mut hasher = reference_impl::Hasher::new();
     hasher.update(input);
